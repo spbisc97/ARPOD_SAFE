@@ -182,7 +182,8 @@ class RendezvousSE2Env(gym.Env):
         obs = self.state.copy()
         if self.p.obs_noise_std > 0.0:
             obs += np.random.normal(0.0, self.p.obs_noise_std, size=obs.shape).astype(np.float32)
-        return np.clip(obs, self.observation_space.low, self.observation_space.high)
+        np.clip(obs, self.observation_space.low, self.observation_space.high, out=obs)
+        return obs
 
     def step(self, action: np.ndarray):
         self._step_count += 1
@@ -202,33 +203,40 @@ class RendezvousSE2Env(gym.Env):
             self._F, self._tau = F_cmd, tau_cmd
 
         x, y, vx, vy, phi, omega = map(float, self.state)
+        dt = self.p.dt
+        inv_m = 1.0 / self._m
+        inv_I = 1.0 / self._I
+        cos_phi = math.cos(phi)
+        sin_phi = math.sin(phi)
 
         # Continuous dynamics
-        ax = (self._F / self._m) * math.cos(phi)
-        ay = (self._F / self._m) * math.sin(phi)
-        alpha = self._tau / self._I
+        ax = (self._F * inv_m) * cos_phi
+        ay = (self._F * inv_m) * sin_phi
+        alpha = self._tau * inv_I
 
         # Semi-implicit (symplectic) Euler integration for better stability
-        vx += ax * self.p.dt
-        vy += ay * self.p.dt
-        omega += alpha * self.p.dt
+        vx += ax * dt
+        vy += ay * dt
+        omega += alpha * dt
 
-        x += vx * self.p.dt
-        y += vy * self.p.dt
-        phi += omega * self.p.dt
+        x += vx * dt
+        y += vy * dt
+        phi += omega * dt
         # wrap angle to [-pi, pi]
         phi = (phi + math.pi) % (2 * math.pi) - math.pi
-
-        self.state = np.array([x, y, vx, vy, phi, omega], dtype=np.float32)
-
+        # in-place update to avoid realloc
+        s = self.state
+        s[0] = x; s[1] = y; s[2] = vx; s[3] = vy; s[4] = phi; s[5] = omega
+        self.state = s
         # Reward shaping
         dist = math.hypot(x, y)
         speed = math.hypot(vx, vy)
         # Radial approach (positive if velocity reduces distance)
         if dist > 1e-6:
-            radial_unit = np.array([x, y]) / dist
-            vel_vec = np.array([vx, vy])
-            approach_speed = -float(radial_unit @ vel_vec)  # positive if approaching
+        #     radial_unit = np.array([x, y]) / dist
+        #     vel_vec = np.array([vx, vy])
+        #     approach_speed = -float(radial_unit @ vel_vec)  # positive if approaching
+            approach_speed = -((x * vx + y * vy) / dist)
         else:
             approach_speed = 0.0
 
@@ -565,8 +573,8 @@ if __name__ == "__main__":
             eval_env = DummyVecEnv([lambda: Monitor(base_env)])
             # If training uses VecNormalize, mirror obs stats for proper eval
             if isinstance(self.model.get_env(), VecNormalize):
-                eval_env = VecNormalize(eval_env, training=False, norm_obs=True, norm_reward=False)
-                eval_env.obs_rms = self.model.get_env().obs_rms
+                eval_env = VecNormalize(eval_env, training=False, norm_obs=False, norm_reward=False)
+                # eval_env.obs_rms = self.model.get_env().obs_rms
 
             # Roll a few eval episodes and plot
             pi = make_policy_from_sb3(self.model)
@@ -592,11 +600,11 @@ if __name__ == "__main__":
     if SAC is not None:
         p = Params()
         n_envs = 4
-        total_timesteps = 600_000
+        total_timesteps = 60_000_000
 
         # Vectorized env with normalization
         vec = DummyVecEnv([make_env(p) for _ in range(n_envs)])
-        vec = VecNormalize(vec, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=0.995)
+        vec = VecNormalize(vec, norm_obs=False, norm_reward=True, clip_obs=10.0, gamma=0.995)
 
         model = SAC(
             policy="MlpPolicy",
@@ -604,11 +612,11 @@ if __name__ == "__main__":
             learning_rate=3e-4,
             buffer_size=1_000_000,
             batch_size=256,
-            tau=0.02,
-            gamma=0.999,
-            train_freq=1,
-            gradient_steps=1,
-            policy_kwargs=dict(net_arch=[256, 256]),
+            tau=0.05,
+            gamma=0.99,
+            train_freq=(10, "step"),
+            gradient_steps=-1,
+            policy_kwargs=dict(net_arch=[256, 256, 64]),
             verbose=1,
             seed=42,
             tensorboard_log="./tb_logs_se2",
@@ -624,4 +632,3 @@ if __name__ == "__main__":
             vec.save(f"vecnorm_se2_{ts}.pkl")
     else:
         print("Stable-Baselines3 not found; skipping training. Install it to train the agent.")
-
