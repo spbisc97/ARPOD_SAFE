@@ -215,6 +215,13 @@ class RendezvousSE2Env(gym.Env):
         alpha = self._tau * inv_I
 
         # Semi-implicit (symplectic) Euler integration for better stability
+        # example:
+        # v_n+1 = v_n + acceleration(v_n, u_n) * dt
+        # x_n+1 = u_n + v_n+1 * dt.
+        # instead of
+        # v_n+1 = v_n + acceleration(v_n, u_n) * dt
+        # x_n+1 = u_n + v_n * dt.
+        
         vx += ax * dt
         vy += ay * dt
         omega += alpha * dt
